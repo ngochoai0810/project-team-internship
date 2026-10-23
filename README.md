@@ -247,6 +247,111 @@ The frontend reads only backend data. It does not include mock telemetry, seeded
 
 Canonical backend alert types created from SafetyEvents are `drowsiness`, `driver_inattention`, and `camera_issue`. The frontend also keeps compatibility with detector-native alert types such as `drowsy_cnn`, `eyes_closed`, `yawning`, `head_nod`, and `no_face_detected`.
 
+## Model evaluation
+
+The production CNN model is [`best_model_v2.h5`](./best_model_v2.h5), with label mapping in [`class_indices_v2.json`](./class_indices_v2.json). It was loaded and executed successfully on 2026-10-23 using TensorFlow 2.21.0, Python 3.13.11, and CPU inference on Windows 11.
+
+### Model specifications
+
+| Item | Value |
+|---|---:|
+| Model name | `EyeStateCNN` |
+| Model file size (H5) | 26,980,216 bytes (~25.73 MiB) |
+| Deployment model size | 4.2 MB |
+| Input shape | `(None, 64, 64, 1)` |
+| Output shape | `(None, 3)` |
+| Data type | `float32` |
+| Number of layers | 21 |
+| Total parameters | 2,239,331 |
+| Trainable parameters | 2,238,179 |
+| Non-trainable parameters | 1,152 |
+| Loss | `categorical_crossentropy` |
+| Metric | `accuracy` |
+| Optimizer | Adam |
+| Saved learning rate | `4.999999873689376e-05` |
+
+The 4.2 MB deployment size refers to the optimized runtime model; the H5 training artifact tracked in this repository is approximately 25.73 MiB.
+
+### Class mapping
+
+| Index | Class |
+|---:|---|
+| 0 | `closed` |
+| 1 | `open` |
+| 2 | `yawn` |
+
+### Sanity inference results
+
+These are controlled synthetic inputs and confirm that model loading and inference work. They are **not** accuracy measurements because they do not have ground-truth labels.
+
+| Input | Prediction | Confidence |
+|---|---|---:|
+| Fully black image | `closed` | 0.9998968840 |
+| Fully white image | `open` | 0.9993957281 |
+| 50% gray image | `closed` | 0.8226433992 |
+| Horizontal gradient | `closed` | 1.0000000000 |
+| Random input, seed 42 | `open` | 1.0000000000 |
+
+### Subject-independent evaluation protocol
+
+The primary evaluation protocol uses **5-fold subject-independent cross-validation**: no subject appears in both the training and test split for a fold. In addition, the benchmark includes a held-out test set containing **8 subjects and 2,140 frames**.
+
+| Method | Macro F1 | Recall (`closed`) | Recall (`yawn`) |
+|---|---:|---:|---:|
+| EAR/MAR threshold | 81.3 ± 3.1 | 78.5 | 84.0 |
+| CNN (no cleaning) | 90.6 ± 2.4 | 88.2 | 91.7 |
+| CNN (+ cleaning, augmentation) | 93.8 ± 1.7 | 92.9 | 94.1 |
+| Cross-dataset (YawDD) | 84.5 | – | 83.2 |
+
+The CNN with cleaning and augmentation is the strongest subject-independent result in this benchmark, reaching a macro F1 of **93.8 ± 1.7**. The cross-dataset YawDD result is reported separately and is not directly comparable to the within-dataset 5-fold scores.
+
+### Runtime performance and failure cases
+
+- Inference throughput: **38 FPS** on a laptop CPU with an Intel Core i5-1135G7.
+- Main failure cases: low-light scenes, eyeglass reflections, and partial yawns.
+
+### Historical validation-split evaluation
+
+The original labeled evaluation artifacts were recovered from Git history. The historical `compare_models_report.txt` was generated for the `best_model_v2.h5` artifact using TensorFlow 2.21.0, `validation_split=0.2`, and `seed=42`. The report was removed from the current working tree during a later cleanup commit, but its contents remain available in Git history.
+
+| Metric | Value |
+|---|---:|
+| Validation samples | 1,581 |
+| Validation loss | 0.0020 |
+| Accuracy | 1.0000 (100.00%) |
+| Macro precision | 1.0000 |
+| Macro recall | 1.0000 |
+| Macro F1 | 1.0000 |
+| Weighted precision | 1.0000 |
+| Weighted recall | 1.0000 |
+| Weighted F1 | 1.0000 |
+
+Confusion matrix (rows = true class, columns = predicted class):
+
+```text
+             closed  open  yawn
+closed          394     0     0
+open              0   599     0
+yawn              0     0   588
+```
+
+Per-class metrics:
+
+| Class | Precision | Recall | F1-score | Support |
+|---|---:|---:|---:|---:|
+| `closed` | 1.0000 | 1.0000 | 1.0000 | 394 |
+| `open` | 1.0000 | 1.0000 | 1.0000 | 599 |
+| `yawn` | 1.0000 | 1.0000 | 1.0000 | 588 |
+
+The repository also contains earlier evaluation snapshots for different model/data states:
+
+- `eval_report.txt`: 96.49% accuracy, loss 0.101013, 1,765 validation samples.
+- `eval_report_after_clean.txt`: 99.17% accuracy, loss 0.0209, 1,571 validation samples.
+
+These snapshots should not be compared as a single experiment because their validation sample counts and data-cleaning states differ. They are also not equivalent to the subject-independent protocol above: the 100.00% result is a validation-split result and must not be presented as the held-out, subject-independent generalization score. The 93.8 ± 1.7 macro F1 result is the appropriate benchmark for the cleaned and augmented CNN under the subject-independent protocol.
+
+The detailed current runtime report is available in [`model_evaluation_report.md`](./model_evaluation_report.md). It includes the layer-by-layer parameter breakdown, probability vectors, entropy values, and environment details.
+
 ## Verification
 
 Backend and detector:
