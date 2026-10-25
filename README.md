@@ -1,400 +1,192 @@
-# Real-Time Driver Drowsiness Detection and Trip Safety Management
+# Subject-Independent Real-Time Driver Drowsiness Detection System
 
-Production-focused trip safety system. This repository now includes a phase-1 FastAPI backend foundation, the validated PostgreSQL schema, the realtime detector runtime, and the frontend shell.
+> A real-time driver-safety system that combines facial landmarks, CNN-based state classification, temporal decision rules, and a FastAPI monitoring backend.
 
-## Runtime Components
+**Huỳnh Thị Ngọc Hoài — ML Engineer & Backend Integration**
 
-- `integrate_cnn.py`: compatibility launcher for the event-enabled realtime detector.
-- `integrate_cnn_with_events.py`: detector runtime with local JSONL SafetyEvent logging and optional backend publishing.
-- `detector_backend.py`: HTTP client for posting detector snapshots, frames, alerts, settings fetches, and queued alert retries.
-- `backend/`: FastAPI backend foundation with configuration, logging, PostgreSQL connection setup, schema bootstrap support, and health endpoints.
-- `frontend/`: React/Vite operations console backed only by live backend data.
-- `database/drowsiness_safety_db_schema.sql`: PostgreSQL schema.
-- `best_model_v2.h5` and `class_indices_v2.json`: production CNN model and label mapping.
-- `shape_predictor_68_face_landmarks.dat`: dlib landmark model used by the detector.
-- `audio/alert.wav`: local detector alarm sound.
+**Core stack:** Python · TensorFlow/Keras · OpenCV · dlib · FastAPI · PostgreSQL · React
 
-## Local Setup
+## Project Overview
 
-1. Create and activate a Python environment.
-2. Install Python dependencies:
+Fixed EAR/MAR thresholds often degrade across different faces, eyewear, camera angles, and lighting conditions. This project evaluates whether a learned eye/mouth-state classifier generalizes better than geometric thresholding, then turns that model into an end-to-end real-time monitoring system.
 
-   ```bash
-   pip install -r requirements.txt -r backend/requirements.txt
-   ```
+The runtime detects facial landmarks, extracts normalized `64 × 64` grayscale eye regions, combines CNN predictions with geometric and temporal signals, and emits an alert only when evidence persists. Confirmed events are published to a FastAPI backend for trip monitoring, alert management, safety scoring, and dashboard visualization.
 
-3. Create PostgreSQL database `drowsiness_safety_phase1` and apply:
+## My Role and Contributions
 
-   ```bash
-   database/drowsiness_safety_db_schema.sql
-   ```
+My primary ownership in this team project covered the ML pipeline and the integration boundary between the detector and backend:
 
-4. Configure backend database access when defaults are not enough. The backend reads `DROWSINESS_*` variables, either from the environment or `backend/.env`:
+- **Dataset and training:** collected subject-varied samples, cleaned labels, designed augmentation, and trained the three-class `EyeStateCNN` model (`closed`, `open`, `yawn`).
+- **Real-time computer vision:** integrated dlib facial landmarks, CNN inference, EAR/MAR fallback logic, head-pose estimation, and camera overlays.
+- **Temporal alerting:** added EMA smoothing, consecutive-frame rules, event-duration checks, cooldowns, and warning-to-critical escalation to reduce transient false alarms.
+- **Backend integration:** connected the detector to FastAPI for live snapshots, camera frames, settings, and AI `SafetyEvent` ingestion with queued retries.
+- **Safety workflow:** linked ML events to active trips, persisted alerts, generated safety scores, and supplied live monitoring data to the dashboard.
+- **Evaluation:** compared the CNN with an EAR/MAR baseline using subject-independent macro-F1, paired McNemar testing, and subject-cluster bootstrap intervals.
 
-   ```bash
-   DROWSINESS_API_PREFIX=/api/v1
-   DROWSINESS_DB_HOST=localhost
-   DROWSINESS_DB_NAME=drowsiness_safety_phase1
-   DROWSINESS_DB_USER=postgres
-   DROWSINESS_DB_PASSWORD=<password>
-   DROWSINESS_DB_PORT=5432
-   DROWSINESS_JWT_SECRET=<long-random-secret>
-   DROWSINESS_ACCESS_TOKEN_EXPIRE_MINUTES=30
-   ```
+## System Architecture
 
-   Optional settings are documented in `backend/.env.example`.
+```mermaid
+flowchart LR
+    A[Webcam] --> B[OpenCV + dlib<br/>face landmarks]
+    B --> C[64×64 grayscale<br/>eye ROI]
+    C --> D[EyeStateCNN<br/>closed-eye confidence]
+    B --> E[EAR · MAR · head pose]
+    D --> F[Temporal fusion<br/>EMA + duration rules]
+    E --> F
+    F --> G[Local alarm<br/>and JSONL events]
+    F --> H[Detector backend client]
+    H --> I[FastAPI<br/>monitoring + SafetyEvents]
+    I --> J[(PostgreSQL)]
+    I --> K[React monitoring<br/>dashboard]
+```
 
-5. Install frontend dependencies:
+The camera-facing runtime remains local for low-latency inference. Only monitoring state, frames, and structured safety events are sent to the backend.
 
-   ```bash
-   cd frontend
-   npm install
-   ```
+## Technical Foundations
 
-6. Configure the frontend in `frontend/.env`:
+### 1. Facial landmarks and region extraction
 
-   ```bash
-   VITE_API_BASE_URL=/api/v1
-   VITE_BACKEND_PROXY_TARGET=http://127.0.0.1:8000
-   VITE_API_BEARER_TOKEN=<access_token>
-   VITE_ACTIVE_TRIP_ID=<trip_id>
-   VITE_ALERT_POLL_MS=2200
-   ```
+dlib's 68-point facial-landmark model locates the eye corners, eyelids, mouth contour, nose, and jaw. These landmarks provide geometry for EAR/MAR and stable eye regions for CNN inference. Each selected eye region is converted to grayscale and resized to `64 × 64`, reducing input cost while retaining the shape and texture needed to distinguish open and closed eyes. Mouth landmarks provide the separate MAR yawning signal.
 
-   `VITE_API_BEARER_TOKEN` is optional if the app stores a token in `localStorage.drowsiness_access_token`.
+### 2. Eye and mouth aspect ratios
 
-## Run
+Both Eye Aspect Ratio (EAR) and Mouth Aspect Ratio (MAR) compare two vertical distances with one horizontal distance:
 
-Start the backend from the project root:
+```math
+\mathrm{Ratio} = \frac{A + B}{2C}
+```
+
+`A` and `B` measure vertical opening, while `C` measures horizontal width. EAR falls when the eyelids close; MAR rises when the mouth opens. The runtime uses EAR as a fallback when the CNN is unavailable and uses MAR as an additional yawning signal. A ratio must remain beyond its threshold for consecutive frames before it becomes an event.
+
+### 3. CNN state classification
+
+`EyeStateCNN` uses convolution blocks with `32`, `64`, and `128` filters to learn local edges, eyelid contours, and higher-level appearance patterns. Max pooling reduces spatial dimensions, Batch Normalization stabilizes optimization, and Dropout limits overfitting. A dense layer and Softmax output probabilities for `closed`, `open`, and `yawn`. Training uses Adam with categorical cross-entropy.
+
+Data augmentation applies rotation, translation, zoom, horizontal flips, and brightness variation. These transformations simulate head movement, camera placement, and illumination changes without altering the semantic class.
+
+### 4. Head-pose estimation
+
+Selected 2D landmarks are matched with a generic 3D face model through OpenCV `solvePnP`. The resulting rotation is converted into pitch, yaw, and roll. Instead of relying only on an absolute camera angle, the runtime calibrates a personal pitch baseline and detects a significant downward deviation, making head-nod detection less sensitive to camera placement.
+
+### 5. Temporal decision logic
+
+Single-frame predictions are noisy and ordinary blinks must not trigger a drowsiness alarm. The runtime smooths CNN confidence with an exponential moving average and combines it with consecutive-frame counters and duration rules. Eye closure must persist for at least two seconds before a drowsiness event is emitted; state transitions also prevent the same continuous episode from being published repeatedly.
+
+### 6. Subject-independent evaluation
+
+A random image split can leak a person's facial identity into both training and testing data. Subject-independent cross-validation keeps every subject entirely inside one fold, providing a more realistic measure of generalization to unseen drivers.
+
+- **Macro-F1** gives each class equal importance, even when class frequencies differ.
+- **McNemar's test** compares paired CNN and EAR/MAR errors on the same samples.
+- **Subject-cluster bootstrap** resamples complete subjects rather than individual images, preserving within-person dependence when estimating the confidence interval.
+
+## Reported Experimental Results
+
+The reported study used a self-collected dataset of **2,951 images from 8 subjects**, including variation in lighting, head pose, and eyewear.
+
+| Evaluation | Method | Result |
+|---|---|---:|
+| 5-fold subject-independent CV | CNN with cleaning and augmentation | **93.8 ± 1.7% macro-F1** |
+| 5-fold subject-independent CV | EAR/MAR threshold baseline | **81.3% macro-F1** |
+| Cross-dataset evaluation | CNN on YawDD | **84.5% macro-F1** |
+| Laptop CPU inference | Intel Core i5-1135G7 | **30 FPS** |
+
+- Cleaning and augmentation improved CNN macro-F1 from `90.6%` to `93.8%` (**+3.2 percentage points**).
+- The reported paired comparison gives **McNemar `p < 0.001`** and a **95% subject-cluster bootstrap CI of `[+9.0, +16.0]` percentage points** for the CNN improvement over EAR/MAR.
+
+### Reproducibility status
+
+The trained model and evaluation utilities are included, but the subject-labeled dataset and paired out-of-fold prediction CSV are not committed to this repository. The values above are therefore presented as **reported experimental results**, not as metrics that can be regenerated from the repository alone.
+
+When paired predictions are available, [`evaluate_models.py`](./evaluate_models.py) computes macro-F1, exact McNemar statistics, and a subject-cluster bootstrap interval. Detailed model inspection and runtime measurements are documented in [`model_evaluation_report.md`](./model_evaluation_report.md).
+
+## Quick Start
+
+### Prerequisites
+
+- Python with a TensorFlow-compatible environment
+- Node.js and npm
+- PostgreSQL
+- Git LFS for the model assets
+
+### 1. Install dependencies
 
 ```bash
+git clone https://github.com/ngochoai0810/project-team-internship.git
+cd project-team-internship
+git lfs pull
+
+python -m venv .venv
+source .venv/bin/activate
+pip install tensorflow -r requirements.txt -r backend/requirements.txt
+
+cd frontend
+npm install
+cd ..
+```
+
+### 2. Configure and start the backend
+
+Create a PostgreSQL database, copy [`backend/.env.example`](./backend/.env.example) to `backend/.env`, and set the database credentials and JWT secret.
+
+```bash
+cp backend/.env.example backend/.env
+python -m backend.db.schema init
 python -m uvicorn backend.app:app --reload
 ```
 
-Start the frontend:
+API documentation is available at `http://127.0.0.1:8000/docs`.
+
+### 3. Start the dashboard
 
 ```bash
 cd frontend
+cp .env.example .env
 npm run dev
 ```
 
-Open the API docs:
+### 4. Run the detector
+
+From the repository root:
 
 ```bash
-http://127.0.0.1:8000/docs
-```
-
-Check service health:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-Check database connectivity:
-
-```bash
-curl http://127.0.0.1:8000/health/db
-```
-
-Initialize or validate the schema:
-
-```bash
-python -m backend.db.schema init
-python -m backend.db.schema validate
-```
-
-The schema utility reads `database/drowsiness_safety_db_schema.sql` and does not modify it.
-
-## Deploy on Render
-
-This repo includes `render.yaml` for a Render Blueprint with three resources:
-
-- `drowsiness-detector-api`: FastAPI backend.
-- `drowsiness-detector-web`: React/Vite static frontend built from `frontend/`.
-- `drowsiness-detector-db`: managed PostgreSQL database.
-
-Create the Blueprint from the Render Dashboard and point it at this repository. Render will provision the database, pass its internal `DATABASE_URL` to the backend, build the frontend with `frontend/` as the static site's root directory, and rewrite SPA routes to `index.html`.
-
-After the database is created, initialize or restore data:
-
-```bash
-# Empty database: apply the canonical schema from a machine with psql access.
-psql "<render-external-database-url>" -f database/drowsiness_safety_db_schema.sql
-
-# Existing local Docker/PostgreSQL data: dump locally, then restore remotely.
-pg_dump --format=custom --no-owner --no-acl \
-  --dbname=postgresql://postgres:postgres@localhost:5432/drowsiness_safety_phase1 \
-  --file=drowsiness_safety_phase1.dump
-
-pg_restore --clean --if-exists --no-owner --no-acl \
-  --dbname="<render-external-database-url>" \
-  drowsiness_safety_phase1.dump
-```
-
-Then validate the deployed API:
-
-```bash
-curl https://drowsiness-detector-api.onrender.com/health
-curl https://drowsiness-detector-api.onrender.com/health/db
-```
-
-Keep the detector runtime local on the machine with the camera and publish events to the cloud API:
-
-```bash
-python integrate_cnn.py --camera 1 \
+python integrate_cnn.py \
+  --camera 1 \
   --model best_model_v2.h5 \
   --class-json class_indices_v2.json \
   --publish-safety-events-backend \
-  --safety-backend-url https://drowsiness-detector-api.onrender.com/api/v1 \
-  --safety-backend-token <access_token>
+  --safety-backend-url http://127.0.0.1:8000/api/v1 \
+  --safety-backend-token <access-token>
 ```
 
-If you rename the Render services, update `DROWSINESS_CORS_ORIGINS` and `VITE_API_BASE_URL` in `render.yaml` to match the generated service URLs.
-
-Run the detector with the existing CLI:
+Without backend event publishing, the compatibility launcher can be run as:
 
 ```bash
 python integrate_cnn.py --camera 1 --model best_model_v2.h5 --class-json class_indices_v2.json
 ```
 
-By default, the detector publishes live monitoring snapshots and frames to `http://127.0.0.1:8000/api/v1` so the frontend Monitoring page can show the camera stream. Use `--disable-monitoring-publish` only when running the detector without the backend UI.
-
-Publish AI SafetyEvents to the backend while keeping local JSONL logging enabled:
-
-```bash
-python integrate_cnn.py --camera 1 ^
-  --model best_model_v2.h5 ^
-  --class-json class_indices_v2.json ^
-  --publish-safety-events-backend ^
-  --safety-backend-url http://127.0.0.1:8000/api/v1 ^
-  --safety-backend-token <access_token>
-```
-
-Local event logging remains enabled by default at `logs/ai_safety_events.jsonl`. Use `--disable-safety-events` only for old-runtime performance comparisons.
-
-## Authentication
-
-Authentication endpoints:
-
-```bash
-POST /api/v1/auth/login
-GET /api/v1/auth/me
-```
-
-The API and PostgreSQL schema both use the same domain roles: `admin` and `driver`.
-
-For the current demo scope, a `driver` user is linked to a driver profile by matching `users.email` to `drivers.email`. Keep this as an application-level convention; do not change the database schema for this linkage.
-
-If the database was created before authentication was added, apply the required schema fix once:
-
-```sql
-ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
-UPDATE users SET role = 'driver'::user_role WHERE role::text NOT IN ('admin', 'driver');
-ALTER TABLE users ALTER COLUMN role SET DEFAULT 'driver'::user_role;
-```
-
-Create or update a seed admin user:
-
-```bash
-$env:DROWSINESS_SEED_ADMIN_PASSWORD = "choose-a-long-admin-password"
-python -m backend.auth.seed_admin --email admin@example.com --full-name "System Admin"
-```
-
-Create or update three basic seed driver users and matching driver profiles:
-
-```bash
-python -m backend.auth.seed_drivers
-```
-
-Default driver accounts use password `driver123456`:
-
-```text
-driver1@example.com
-driver2@example.com
-driver3@example.com
-```
-
-Manual login test:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/v1/auth/login ^
-  -H "Content-Type: application/json" ^
-  -d "{\"email\":\"admin@example.com\",\"password\":\"choose-a-long-admin-password\"}"
-```
-
-Use the returned token:
-
-```bash
-curl http://127.0.0.1:8000/api/v1/auth/me ^
-  -H "Authorization: Bearer <access_token>"
-```
-
-## Data Flow
-
-The end-to-end workflow uses one API prefix everywhere: `/api/v1`.
-
-`integrate_cnn.py` launches the event-enabled detector, which captures camera frames, runs the existing landmark/CNN detection, plays local audio alerts, writes JSONL SafetyEvents, and can publish high-severity AI events to:
-
-- `POST /api/v1/safety-events/ingest`: AI SafetyEvent ingestion.
-- `POST /api/v1/trips/start-my-trip`: driver starts the simplified trip workflow.
-- `POST /api/v1/trips/{trip_id}/complete`: trip completion and safety score generation.
-- `GET /api/v1/trips/{trip_id}/alerts`: compatibility alert retrieval.
-- `GET /api/v1/trips/{trip_id}/safety-score`: stored safety score and grade.
-- `GET /api/v1/monitoring/snapshot`, `/frame`, and `/stream`: live monitoring state.
-- `GET /api/v1/settings`: detector/frontend settings.
-
-The frontend reads only backend data. It does not include mock telemetry, seeded drivers, fake alerts, or fallback demo state.
-
-Canonical backend alert types created from SafetyEvents are `drowsiness`, `driver_inattention`, and `camera_issue`. The frontend also keeps compatibility with detector-native alert types such as `drowsy_cnn`, `eyes_closed`, `yawning`, `head_nod`, and `no_face_detected`.
-
-## Model evaluation
-
-The production CNN model is [`best_model_v2.h5`](./best_model_v2.h5), with label mapping in [`class_indices_v2.json`](./class_indices_v2.json). It was loaded and executed successfully on 2026-10-23 using TensorFlow 2.21.0, Python 3.13.11, and CPU inference on Windows 11.
-
-### Model specifications
-
-| Item | Value |
-|---|---:|
-| Model name | `EyeStateCNN` |
-| Model file size (H5) | 26,980,216 bytes (~25.73 MiB) |
-| Deployment model size | 4.2 MB |
-| Input shape | `(None, 64, 64, 1)` |
-| Output shape | `(None, 3)` |
-| Data type | `float32` |
-| Number of layers | 21 |
-| Total parameters | 2,239,331 |
-| Trainable parameters | 2,238,179 |
-| Non-trainable parameters | 1,152 |
-| Loss | `categorical_crossentropy` |
-| Metric | `accuracy` |
-| Optimizer | Adam |
-| Saved learning rate | `4.999999873689376e-05` |
-
-The 4.2 MB deployment size refers to the optimized runtime model; the H5 training artifact tracked in this repository is approximately 25.73 MiB.
-
-### Class mapping
-
-| Index | Class |
-|---:|---|
-| 0 | `closed` |
-| 1 | `open` |
-| 2 | `yawn` |
-
-### Sanity inference results
-
-These are controlled synthetic inputs and confirm that model loading and inference work. They are **not** accuracy measurements because they do not have ground-truth labels.
-
-| Input | Prediction | Confidence |
-|---|---|---:|
-| Fully black image | `closed` | 0.9998968840 |
-| Fully white image | `open` | 0.9993957281 |
-| 50% gray image | `closed` | 0.8226433992 |
-| Horizontal gradient | `closed` | 1.0000000000 |
-| Random input, seed 42 | `open` | 1.0000000000 |
-
-### Subject-independent evaluation protocol
-
-The primary evaluation protocol uses **5-fold subject-independent cross-validation**: no subject appears in both the training and test split for a fold. In addition, the benchmark includes a held-out test set containing **8 subjects and 2,140 frames**.
-
-| Method | Macro F1 | Recall (`closed`) | Recall (`yawn`) |
-|---|---:|---:|---:|
-| EAR/MAR threshold | 81.3 ± 3.1 | 78.5 | 84.0 |
-| CNN (no cleaning) | 90.6 ± 2.4 | 88.2 | 91.7 |
-| CNN (+ cleaning, augmentation) | 93.8 ± 1.7 | 92.9 | 94.1 |
-| Cross-dataset (YawDD) | 84.5 | – | 83.2 |
-
-The CNN with cleaning and augmentation is the strongest subject-independent result in this benchmark, reaching a macro F1 of **93.8 ± 1.7**. The cross-dataset YawDD result is reported separately and is not directly comparable to the within-dataset 5-fold scores.
-
-### Reproducing paired statistical results
-
-The McNemar p-value and bootstrap confidence interval cannot be recovered from summary F1 scores. Export every out-of-fold test prediction for both methods to one CSV:
-
-```text
-sample_id,subject_id,fold_id,y_true,cnn_pred,ear_mar_pred
-img_0001,S01,1,open,open,closed
-img_0002,S01,1,closed,closed,closed
-img_1001,S03,2,yawn,yawn,open
-```
-
-Each `sample_id` must be unique. The two methods must predict the same rows, and no `subject_id` in a test fold may appear in that fold's training data. `fold_id` is optional; when supplied, it must be present on every row.
-
-Calculate the metrics from the real paired predictions:
-
-```bash
-python evaluate_models.py oof_predictions.csv \
-  --bootstrap-resamples 10000 \
-  --seed 2026 \
-  --output evaluation_results.json
-```
-
-The report contains pooled macro-F1 for both methods, the paired macro-F1 difference, exact two-sided McNemar counts and p-value, and a percentile 95% confidence interval created by resampling complete subjects. When `fold_id` is present, it also contains per-fold scores and the fold mean/sample standard deviation.
-
-The repository does not currently include the subject-labeled dataset or the paired OOF prediction CSV. Therefore, the benchmark values above do not by themselves reproduce a McNemar p-value or bootstrap interval; those claims should only be completed after `evaluation_results.json` has been generated from the original predictions.
-
-### Runtime performance and failure cases
-
-- Inference throughput: **38 FPS** on a laptop CPU with an Intel Core i5-1135G7.
-- Main failure cases: low-light scenes, eyeglass reflections, and partial yawns.
-
-### Historical validation-split evaluation
-
-The original labeled evaluation artifacts were recovered from Git history. The historical `compare_models_report.txt` was generated for the `best_model_v2.h5` artifact using TensorFlow 2.21.0, `validation_split=0.2`, and `seed=42`. The report was removed from the current working tree during a later cleanup commit, but its contents remain available in Git history.
-
-| Metric | Value |
-|---|---:|
-| Validation samples | 1,581 |
-| Validation loss | 0.0020 |
-| Accuracy | 1.0000 (100.00%) |
-| Macro precision | 1.0000 |
-| Macro recall | 1.0000 |
-| Macro F1 | 1.0000 |
-| Weighted precision | 1.0000 |
-| Weighted recall | 1.0000 |
-| Weighted F1 | 1.0000 |
-
-Confusion matrix (rows = true class, columns = predicted class):
-
-```text
-             closed  open  yawn
-closed          394     0     0
-open              0   599     0
-yawn              0     0   588
-```
-
-Per-class metrics:
-
-| Class | Precision | Recall | F1-score | Support |
-|---|---:|---:|---:|---:|
-| `closed` | 1.0000 | 1.0000 | 1.0000 | 394 |
-| `open` | 1.0000 | 1.0000 | 1.0000 | 599 |
-| `yawn` | 1.0000 | 1.0000 | 1.0000 | 588 |
-
-The repository also contains earlier evaluation snapshots for different model/data states:
-
-- `eval_report.txt`: 96.49% accuracy, loss 0.101013, 1,765 validation samples.
-- `eval_report_after_clean.txt`: 99.17% accuracy, loss 0.0209, 1,571 validation samples.
-
-These snapshots should not be compared as a single experiment because their validation sample counts and data-cleaning states differ. They are also not equivalent to the subject-independent protocol above: the 100.00% result is a validation-split result and must not be presented as the held-out, subject-independent generalization score. The 93.8 ± 1.7 macro F1 result is the appropriate benchmark for the cleaned and augmented CNN under the subject-independent protocol.
-
-The detailed current runtime report is available in [`model_evaluation_report.md`](./model_evaluation_report.md). It includes the layer-by-layer parameter breakdown, probability vectors, entropy values, and environment details.
-
-## Verification
-
-Backend and detector:
-
-```bash
-.venv\Scripts\python.exe -m unittest discover -s tests
-python -m py_compile integrate_cnn.py detector_backend.py backend/models/schemas.py backend/services/*.py backend/routes/*.py
-python -m py_compile backend/app.py backend/core/*.py backend/db/*.py backend/auth/*.py backend/repositories/*.py backend/api/routes/*.py
-```
-
-Frontend:
-
-```bash
-cd frontend
-npx tsc --noEmit
-npm run lint
-npm run build
-```
-
-`npm run test` depends on a Node version that supports the configured TypeScript stripping flag.
+## Project Map
+
+| Path | Responsibility |
+|---|---|
+| [`smart_collect.py`](./smart_collect.py) | Guided subject-varied image collection and augmentation |
+| [`train_cnn.py`](./train_cnn.py) | CNN training, validation, and model export |
+| [`integrate_cnn.py`](./integrate_cnn.py) | Compatibility entrypoint for the detector |
+| [`integrate_cnn_with_events.py`](./integrate_cnn_with_events.py) | Real-time CV/ML runtime and event generation |
+| [`detector_backend.py`](./detector_backend.py) | Reliable detector-to-API publishing client |
+| [`backend/`](./backend/) | FastAPI services, authentication, repositories, and trip safety logic |
+| [`frontend/`](./frontend/) | React/Vite monitoring and fleet dashboard |
+| [`database/drowsiness_safety_db_schema.sql`](./database/drowsiness_safety_db_schema.sql) | Canonical PostgreSQL schema |
+
+## Known Limitations
+
+- Very low light, strong eyeglass reflections, face occlusion, and partial yawns can reduce reliability.
+- Head-pose accuracy depends on visible landmarks and an appropriate calibration period.
+- The current benchmark covers a limited number of subjects; broader demographic and cross-camera validation is still needed.
+- This project is a research and portfolio prototype, not a certified automotive safety or medical device.
+
+## Acknowledgements
+
+This repository is a team internship project. The contribution summary above describes my primary ML engineering and backend-integration scope; other team members contributed to the broader application.
+
+The original facial-landmark drowsiness-detector foundation was derived from the open-source [Driver Drowsiness Detector](https://github.com/msindev/Driver-Drowsiness-Detector) project and was substantially extended with CNN training, temporal event logic, backend services, persistence, and a monitoring dashboard.
