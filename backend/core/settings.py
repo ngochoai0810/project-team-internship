@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+    demo_auth_enabled: bool = False
     schema_path: Path = Field(
         default=BASE_DIR / "database" / "drowsiness_safety_db_schema.sql",
     )

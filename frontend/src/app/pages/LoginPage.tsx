@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { useAuth } from "../auth/AuthContext";
+import { BackendApiError } from "../services/backendApi";
 
 export function LoginPage() {
   const { t } = useTranslation("auth");
@@ -17,7 +18,7 @@ export function LoginPage() {
   const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const reduceMotion = useReducedMotion();
 
@@ -28,12 +29,18 @@ export function LoginPage() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(false);
+    setError(null);
     setIsSubmitting(true);
     try {
       await login(email, password);
-    } catch {
-      setError(true);
+    } catch (caughtError) {
+      if (caughtError instanceof BackendApiError && caughtError.status === 401) {
+        setError(t("login.invalidCredentials"));
+      } else if (caughtError instanceof Error && caughtError.message.trim() !== "") {
+        setError(caughtError.message);
+      } else {
+        setError(t("login.invalidCredentials"));
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -178,7 +185,7 @@ export function LoginPage() {
                     aria-hidden
                     className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-rose-400"
                   />
-                  {t("login.invalidCredentials")}
+                  {error}
                 </p>
               ) : null}
 
