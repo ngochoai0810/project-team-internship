@@ -8,6 +8,7 @@ from backend.auth.roles import UserRole
 from backend.core.settings import get_settings
 from backend.repositories.user_repository import UserRepository
 from backend.services.user_service import public_user
+from sqlalchemy.exc import OperationalError
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -37,7 +38,21 @@ def get_current_user(
     except TokenError:
         raise credentials_error() from None
 
-    user = UserRepository().find_by_id(str(payload["sub"]))
+    try:
+        user = UserRepository().find_by_id(str(payload["sub"]))
+    except OperationalError:
+        if settings.demo_auth_enabled and str(payload["sub"]).startswith("demo-driver"):
+            driver_number = str(payload["sub"]).removeprefix("demo-driver")
+            return {
+                "user_id": str(payload["sub"]),
+                "full_name": f"Demo Driver {driver_number}",
+                "email": f"driver{driver_number}@example.com",
+                "role": UserRole.DRIVER,
+                "status": "active",
+                "created_at": None,
+                "updated_at": None,
+            }
+        raise credentials_error("Database is unavailable.") from None
     if user is None:
         raise credentials_error()
     if user.get("status") != "active":

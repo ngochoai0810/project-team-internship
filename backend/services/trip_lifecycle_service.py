@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from backend.auth.roles import UserRole
 from backend.models.driver import DriverStatus
@@ -10,9 +12,11 @@ from backend.repositories.trip_repository import TripRepository
 from backend.services.safety_service import calculate_safety_score, safety_grade
 from backend.services.safety_policy import CRITICAL_ALERT_PENALTY, WARNING_ALERT_PENALTY
 from backend.services.setting_service import get_global_settings
+from backend.core.settings import get_settings
 
 
 TRIP_CODE_MAX_LENGTH = 50
+_DEMO_TRIPS: dict[str, dict[str, Any]] = {}
 
 
 class TripNotFoundError(Exception):
@@ -74,6 +78,8 @@ class TripLifecycleService:
             if not email:
                 return []
             user_id = str(current_user.get("user_id") or "")
+            if get_settings().demo_auth_enabled and user_id.startswith("demo-driver"):
+                return self._demo_trips_for_user(user_id)
             return self._with_safety_summaries(
                 self.trip_repository.list_trips_for_user(
                     user_id=user_id,
@@ -95,6 +101,8 @@ class TripLifecycleService:
         email = (current_user.get("email") or "").strip()
         if not user_id or not email:
             raise TripAccessDeniedError("Driver identity is incomplete.")
+        if get_settings().demo_auth_enabled and user_id.startswith("demo-driver"):
+            return self._start_demo_trip(payload, current_user=current_user)
         if self.trip_repository.find_active_trip_for_user(user_id=user_id, driver_email=email):
             raise TripConflictError("Driver already has an active trip.")
         try:
@@ -112,14 +120,72 @@ class TripLifecycleService:
         except IntegrityError as exc:
             raise TripConflictError("Trip code already exists.") from exc
 
+    def _start_demo_trip(
+        self,
+        payload: StartMyTripRequest,
+        *,
+        current_user: dict[str, Any],
+    ) -> dict[str, Any]:
+        user_id = str(current_user["user_id"])
+        existing = next(
+            (
+                trip
+                for trip in _DEMO_TRIPS.values()
+                if trip["created_by"] == user_id and trip["status"] == TripStatus.IN_PROGRESS
+            ),
+            None,
+        )
+        if existing is not None:
+            raise TripConflictError("Driver already has an active trip.")
+
+        now = datetime.now(timezone.utc)
+        trip_id = str(uuid4())
+        trip = {
+            "trip_id": trip_id,
+            "code": payload.code or f"DEMO-{now:%y%m%d-%H%M%S}",
+            "driver_id": None,
+            "driver_name": current_user.get("full_name"),
+            "driver_email": current_user.get("email"),
+            "vehicle_plate": None,
+            "status": TripStatus.IN_PROGRESS,
+            "planned_start_at": None,
+            "planned_end_at": None,
+            "actual_start_at": now,
+            "actual_end_at": None,
+            "origin": payload.origin,
+            "destination": payload.destination,
+            "cancelled_reason": None,
+            "aborted_reason": None,
+            "created_by": user_id,
+            "created_at": now,
+            "updated_at": now,
+            "assignment": None,
+            "monitoring_session": None,
+            "safety_score": None,
+            "total_alerts_count": 0,
+            "critical_alerts_count": 0,
+        }
+        _DEMO_TRIPS[trip_id] = trip
+        return trip
+
     def active_trip(self, *, current_user: dict[str, Any]) -> dict[str, Any] | None:
         role = current_user["role"]
         if role == UserRole.ADMIN:
             trips = self.trip_repository.list_trips(status=TripStatus.IN_PROGRESS)
             return self._with_safety_summary(trips[0]) if trips else None
         if role == UserRole.DRIVER:
+            user_id = str(current_user.get("user_id") or "")
+            if get_settings().demo_auth_enabled and user_id.startswith("demo-driver"):
+                return next(
+                    (
+                        trip
+                        for trip in _DEMO_TRIPS.values()
+                        if trip["created_by"] == user_id and trip["status"] == TripStatus.IN_PROGRESS
+                    ),
+                    None,
+                )
             trip = self.trip_repository.find_active_trip_for_user(
-                user_id=str(current_user.get("user_id") or ""),
+                user_id=user_id,
                 driver_email=(current_user.get("email") or "").strip(),
             )
             if trip is not None:
@@ -133,12 +199,22 @@ class TripLifecycleService:
     def list_my_trips(self, *, current_user: dict[str, Any]) -> list[dict[str, Any]]:
         if current_user["role"] != UserRole.DRIVER:
             raise TripAccessDeniedError("Only drivers can list their own trips.")
+        user_id = str(current_user.get("user_id") or "")
+        if get_settings().demo_auth_enabled and user_id.startswith("demo-driver"):
+            return self._demo_trips_for_user(user_id)
         return self._with_safety_summaries(
             self.trip_repository.list_trips_for_user(
-                user_id=str(current_user.get("user_id") or ""),
+                user_id=user_id,
                 driver_email=(current_user.get("email") or "").strip(),
             )
         )
+
+    def _demo_trips_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            trip
+            for trip in _DEMO_TRIPS.values()
+            if trip["created_by"] == user_id
+        ]
 
     def get_trip(self, trip_id: str, *, current_user: dict[str, Any]) -> dict[str, Any]:
         trip = self._get_trip_or_raise(trip_id)

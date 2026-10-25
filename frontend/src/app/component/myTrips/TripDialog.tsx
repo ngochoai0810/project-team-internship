@@ -490,7 +490,7 @@ function drawOutlinedText(
   x: number,
   y: number,
   options: {
-    align?: CanvasTextAlign;
+    align?: "left" | "right" | "center" | "start" | "end";
     color: string;
     fontSize: number;
     lineWidth?: number;

@@ -305,6 +305,32 @@ The primary evaluation protocol uses **5-fold subject-independent cross-validati
 
 The CNN with cleaning and augmentation is the strongest subject-independent result in this benchmark, reaching a macro F1 of **93.8 ± 1.7**. The cross-dataset YawDD result is reported separately and is not directly comparable to the within-dataset 5-fold scores.
 
+### Reproducing paired statistical results
+
+The McNemar p-value and bootstrap confidence interval cannot be recovered from summary F1 scores. Export every out-of-fold test prediction for both methods to one CSV:
+
+```text
+sample_id,subject_id,fold_id,y_true,cnn_pred,ear_mar_pred
+img_0001,S01,1,open,open,closed
+img_0002,S01,1,closed,closed,closed
+img_1001,S03,2,yawn,yawn,open
+```
+
+Each `sample_id` must be unique. The two methods must predict the same rows, and no `subject_id` in a test fold may appear in that fold's training data. `fold_id` is optional; when supplied, it must be present on every row.
+
+Calculate the metrics from the real paired predictions:
+
+```bash
+python evaluate_models.py oof_predictions.csv \
+  --bootstrap-resamples 10000 \
+  --seed 2026 \
+  --output evaluation_results.json
+```
+
+The report contains pooled macro-F1 for both methods, the paired macro-F1 difference, exact two-sided McNemar counts and p-value, and a percentile 95% confidence interval created by resampling complete subjects. When `fold_id` is present, it also contains per-fold scores and the fold mean/sample standard deviation.
+
+The repository does not currently include the subject-labeled dataset or the paired OOF prediction CSV. Therefore, the benchmark values above do not by themselves reproduce a McNemar p-value or bootstrap interval; those claims should only be completed after `evaluation_results.json` has been generated from the original predictions.
+
 ### Runtime performance and failure cases
 
 - Inference throughput: **38 FPS** on a laptop CPU with an Intel Core i5-1135G7.
